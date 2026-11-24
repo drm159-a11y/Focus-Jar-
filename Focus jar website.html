@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Focus Jar</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px; font: 1rem system-ui, sans-serif; color: #24263b; background: #efedf8; }
+    main { max-width: 34rem; margin: auto; padding: 24px; background: white; border-radius: 20px; }
+    h1, #timer, #jar-section { text-align: center; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    #timer .row { justify-content: center; }
+    button, input { font: inherit; padding: 8px; border: 1px solid #756c89; border-radius: 8px; }
+    button { cursor: pointer; background: #f3f1f8; color: inherit; }
+    .on, #toggle, #task-form button { background: #483776; color: white; }
+    input[type="number"] { width: 5rem; }
+    #clock { font-size: 4rem; font-variant-numeric: tabular-nums; margin: 8px 0; }
+    #status { min-height: 1.5em; }
+    #task-list { padding: 0; list-style: none; }
+    #task-list li { display: flex; gap: 8px; margin-bottom: 8px; }
+    .task { flex: 1; min-width: 0; overflow-wrap: anywhere; text-align: left; }
+    .done { text-decoration: line-through; }
+    #jar { width: 136px; height: 120px; margin: 0 auto; padding: 10px; border: 3px solid #8271a7; border-radius: 8px 8px 28px 28px; background: #f3effc; display: flex; flex-wrap: wrap-reverse; gap: 4px; align-content: flex-start; }
+    .marble { width: 19px; height: 19px; border-radius: 50%; background: radial-gradient(circle at 30% 25%, #dfcfff, #6847ae 72%); }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Focus Jar</h1>
+    <section id="timer" aria-label="Session timer">
+      <form id="lengths" class="row">
+        <label>Focus minutes <input id="focus-minutes" type="number" min="1" max="120" required></label>
+        <label>Break minutes <input id="break-minutes" type="number" min="1" max="120" required></label>
+        <button>Set lengths</button>
+      </form>
+      <p class="row">
+        <button id="focus" type="button">Focus</button>
+        <button id="break" type="button">Break</button>
+      </p>
+      <p id="clock" role="timer">25:00</p>
+      <div class="row">
+        <button id="toggle" type="button">Start</button>
+        <button id="reset" type="button">Reset</button>
+        <label><input id="demo" type="checkbox"> Demo speed</label>
+      </div>
+      <p id="status" role="status"></p>
+      <button id="test-sound" type="button">Test sound</button>
+      <output id="sound-status" role="status"></output>
+    </section>
+    <section>
+      <h2>Tasks</h2>
+      <form id="task-form" class="row">
+        <input id="task-input" aria-label="New task" placeholder="New task" required>
+        <button>Add</button>
+      </form>
+      <ul id="task-list"></ul>
+    </section>
+    <section id="jar-section">
+      <h2>Marble jar</h2>
+      <div id="jar" aria-hidden="true"></div>
+      <p id="today"></p>
+      <p id="all-time"></p>
+    </section>
+  </main>
+
+  <script>
+    const clock = document.querySelector("#clock");
+    const toggle = document.querySelector("#toggle");
+    const focus = document.querySelector("#focus");
+    const breakButton = document.querySelector("#break");
+    const focusInput = document.querySelector("#focus-minutes");
+    const breakInput = document.querySelector("#break-minutes");
+    const demo = document.querySelector("#demo");
+    const status = document.querySelector("#status");
+    const taskInput = document.querySelector("#task-input");
+    const taskList = document.querySelector("#task-list");
+    const jar = document.querySelector("#jar");
+
+    const saved = JSON.parse(localStorage.getItem("focusJar") || "{}");
+    const tasks = saved.tasks || [];
+    const marblesByDay = saved.marblesByDay || {};
+    const lengths = saved.lengths || { focus: 25, break: 5 };
+    let mode = "focus";
+    let secondsLeft = lengths.focus * 60;
+    let timer = null;
+    let audio;
+
+    focusInput.value = lengths.focus;
+    breakInput.value = lengths.break;
+
+    function save() {
+      localStorage.setItem("focusJar", JSON.stringify({ tasks, marblesByDay, lengths }));
+    }
+
+    function todayKey() {
+      // Use the browser's local calendar date.
+      const now = new Date();
+      return [now.getFullYear(), now.getMonth() + 1, now.getDate()].join("-");
+    }
+
+    function sessionLabel(count) {
+      return count + (count === 1 ? " focus session" : " focus sessions");
+    }
+
+    function drawJar() {
+      const today = marblesByDay[todayKey()] || 0;
+      const total = Object.values(marblesByDay).reduce((sum, count) => sum + count, 0);
+      document.querySelector("#today").textContent = "Today: " + sessionLabel(today);
+      document.querySelector("#all-time").textContent = "All-time: " + sessionLabel(total);
+      jar.replaceChildren();
+      for (let i = 0; i < Math.min(total, 20); i++) {
+        const marble = document.createElement("span");
+        marble.className = "marble";
+        jar.append(marble);
+      }
+    }
+
+    function showTime() {
+      const minutes = String(Math.floor(secondsLeft / 60)).padStart(2, "0");
+      const seconds = String(secondsLeft % 60).padStart(2, "0");
+      clock.textContent = minutes + ":" + seconds;
+    }
+
+    function stop() {
+      clearInterval(timer);
+      timer = null;
+      toggle.textContent = "Start";
+    }
+
+    function reset() {
+      stop();
+      secondsLeft = lengths[mode] * 60;
+      status.textContent = "";
+      focus.classList.toggle("on", mode === "focus");
+      breakButton.classList.toggle("on", mode === "break");
+      focus.setAttribute("aria-pressed", mode === "focus");
+      breakButton.setAttribute("aria-pressed", mode === "break");
+      showTime();
+    }
+
+    const soundStatus = document.querySelector("#sound-status");
+
+    function unlockSound() {
+      const AudioEngine = window.AudioContext || window.webkitAudioContext;
+      if (!AudioEngine) throw new Error("Audio is unavailable");
+
+      audio = audio || new AudioEngine();
+      const ready = audio.resume();
+
+      // Start a silent tone during the click to unlock browser audio.
+      const silentTone = audio.createOscillator();
+      const mute = audio.createGain();
+      mute.gain.value = 0;
+      silentTone.connect(mute);
+      mute.connect(audio.destination);
+      silentTone.start();
+      silentTone.stop(audio.currentTime + 0.02);
+      return ready;
+    }
+
+    async function playSound(test = false) {
+      try {
+        if (test) await unlockSound();
+        if (!audio || audio.state !== "running") {
+          throw new Error("Audio is paused");
+        }
+        const tone = audio.createOscillator();
+        const volume = audio.createGain();
+        const now = audio.currentTime;
+        tone.frequency.setValueAtTime(660, now);
+        tone.frequency.setValueAtTime(880, now + 0.3);
+        volume.gain.setValueAtTime(0.28, now);
+        volume.gain.exponentialRampToValueAtTime(0.001, now + 0.85);
+        tone.connect(volume);
+        volume.connect(audio.destination);
+        tone.start();
+        tone.stop(now + 0.85);
+        soundStatus.textContent = "";
+      } catch {
+        soundStatus.textContent = test
+          ? "The browser could not play audio."
+          : "Sound was unavailable. Try Test sound.";
+      }
+    }
+
+    document.querySelector("#test-sound").addEventListener("click", () => playSound(true));
+
+    function tick() {
+      secondsLeft = Math.max(0, secondsLeft - (demo.checked ? 60 : 1));
+      showTime();
+      if (secondsLeft > 0) return;
+      stop();
+      playSound();
+      status.textContent = mode === "focus" ? "Focus session complete!" : "Break complete!";
+      if (mode === "focus") {
+        const day = todayKey();
+        marblesByDay[day] = (marblesByDay[day] || 0) + 1;
+        save();
+        drawJar();
+      }
+    }
+
+    toggle.addEventListener("click", () => {
+      if (timer !== null) {
+        stop();
+        return;
+      }
+      try {
+        unlockSound().catch(() => {
+          soundStatus.textContent = "Sound was unavailable. Try Test sound.";
+        });
+      } catch {
+        soundStatus.textContent = "Sound was unavailable. Try Test sound.";
+      }
+      if (secondsLeft === 0) reset();
+      timer = setInterval(tick, 1000);
+      toggle.textContent = "Pause";
+    });
+
+    focus.addEventListener("click", () => { mode = "focus"; reset(); });
+    breakButton.addEventListener("click", () => { mode = "break"; reset(); });
+    document.querySelector("#reset").addEventListener("click", reset);
+    document.querySelector("#lengths").addEventListener("submit", (event) => {
+      event.preventDefault();
+      lengths.focus = focusInput.valueAsNumber;
+      lengths.break = breakInput.valueAsNumber;
+      save();
+      reset();
+    });
+
+    function drawTasks() {
+      taskList.replaceChildren();
+      tasks.forEach((task, index) => {
+        const item = document.createElement("li");
+        const name = document.createElement("button");
+        const remove = document.createElement("button");
+        name.className = task.done ? "task done" : "task";
+        name.textContent = task.text;
+        name.setAttribute("aria-pressed", task.done);
+        name.addEventListener("click", () => {
+          task.done = !task.done;
+          name.classList.toggle("done", task.done);
+          name.setAttribute("aria-pressed", task.done);
+          save();
+        });
+        remove.textContent = "×";
+        remove.setAttribute("aria-label", "Delete " + task.text);
+        remove.addEventListener("click", () => {
+          tasks.splice(index, 1);
+          save();
+          drawTasks();
+        });
+        item.append(name, remove);
+        taskList.append(item);
+      });
+    }
+
+    document.querySelector("#task-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const text = taskInput.value.trim();
+      if (!text) return;
+      tasks.push({ text, done: false });
+      taskInput.value = "";
+      save();
+      drawTasks();
+    });
+
+    reset();
+    drawTasks();
+    drawJar();
+    setInterval(drawJar, 60000);
+  </script>
+</body>
+</html>
